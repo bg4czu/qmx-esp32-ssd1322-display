@@ -1,13 +1,6 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <U8g2lib.h>
-#include <WiFi.h>
-#include <WebServer.h>
-#include <DNSServer.h>
-#include <Preferences.h>
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
-#include <time.h>
 
 constexpr uint8_t OLED_SCK = 12;
 constexpr uint8_t OLED_MOSI = 11;
@@ -15,8 +8,6 @@ constexpr uint8_t OLED_RST = 13;
 constexpr uint8_t OLED_DC = 9;
 constexpr uint8_t OLED_CS = 10;
 constexpr char DISPLAY_TITLE[] = "BG4CZU";
-constexpr char SETUP_AP_SSID[] = "QMX_UTC";
-constexpr char SETUP_AP_PASSWORD[] = "qmxutc88";  // Change before sharing hardware.
 // Verified wiring: QMX Tip/ red wire is QMX TX -> ESP RX GPIO18; Ring/white
 // wire is QMX RX <- ESP TX GPIO17. Keep this direction fixed during FT8.
 constexpr uint8_t QMX_RX = 17;
@@ -26,9 +17,6 @@ constexpr uint32_t QMX_BAUD = 9600;
 U8G2_SSD1322_NHD_256X64_F_4W_HW_SPI oled(
     U8G2_R0, OLED_CS, OLED_DC, OLED_RST);
 HardwareSerial qmx(1);
-WebServer utcConfigServer(80);
-DNSServer utcConfigDns;
-Preferences utcPreferences;
 
 String reply;
 uint64_t frequencyHz = 0;
@@ -59,213 +47,10 @@ bool utcValid = false;
 bool auxAlive = false;
 uint32_t lastReplyMs = 0;
 uint32_t lastQueryMs = 0;
+uint32_t lastDisplayMs = 0;
 uint8_t queryStep = 0;
 
-bool utcWifiConnecting = false;
-bool utcWifiPortal = false;
-bool ntpTimeValid = false;
-bool ntpConfigured = false;
-uint32_t utcWifiStartedMs = 0;
-uint32_t utcPortalStartedMs = 0;
-uint32_t lastNtpDisplayMs = 0;
-
-int currentSolarFlux = 0;
-int currentKIndex = -1;
-bool solarDataValid = false;
-volatile bool solarFetchRunning = false;
-volatile bool solarUpdateReady = false;
-uint32_t lastSolarFetchMs = 0;
-
 void drawDisplay();
-
-int solarXmlNumber(const String &body, const char *tag) {
-  const String openTag = String("<") + tag + ">";
-  const String closeTag = String("</") + tag + ">";
-  int start = body.indexOf(openTag);
-  if (start < 0) return -1;
-  start += openTag.length();
-  const int end = body.indexOf(closeTag, start);
-  return end > start ? body.substring(start, end).toInt() : -1;
-}
-
-const char *bandPropagationText() {
-  if (!solarDataValid || !frequencyHz) return "WAIT";
-  if (currentKIndex >= 5) return "POOR";
-
-  const float mhz = frequencyHz / 1000000.0f;
-  int neededFlux = 70;
-  if (mhz >= 50.0f) neededFlux = 170;
-  else if (mhz >= 28.0f) neededFlux = 140;
-  else if (mhz >= 24.0f) neededFlux = 120;
-  else if (mhz >= 21.0f) neededFlux = 110;
-  else if (mhz >= 18.0f) neededFlux = 100;
-  else if (mhz >= 14.0f) neededFlux = 90;
-  else if (mhz >= 10.0f) neededFlux = 80;
-
-  if (currentKIndex <= 3 && currentSolarFlux >= neededFlux) return "GOOD";
-  if (currentKIndex <= 4 && currentSolarFlux >= neededFlux - 25) return "FAIR";
-  return "POOR";
-}
-
-void solarFetchTask(void *) {
-  int newFlux = -1;
-  int newK = -1;
-  WiFiClientSecure secure;
-  secure.setInsecure();
-  HTTPClient request;
-  request.setTimeout(8000);
-  if (request.begin(secure, "https://www.hamqsl.com/solarxml.php")) {
-    if (request.GET() == HTTP_CODE_OK) {
-      const String body = request.getString();
-      newFlux = solarXmlNumber(body, "solarflux");
-      newK = solarXmlNumber(body, "kindex");
-    }
-    request.end();
-  }
-  if (newFlux > 0 && newK >= 0) {
-    currentSolarFlux = newFlux;
-    currentKIndex = newK;
-    solarDataValid = true;
-  }
-  lastSolarFetchMs = millis();
-  solarUpdateReady = true;
-  solarFetchRunning = false;
-  vTaskDelete(nullptr);
-}
-
-void maintainSolarData() {
-  if (solarUpdateReady) {
-    solarUpdateReady = false;
-    drawDisplay();
-  }
-  if (WiFi.status() != WL_CONNECTED || solarFetchRunning) return;
-  // HAMQSL asks clients to update no more often than once per hour.
-  if (lastSolarFetchMs != 0 && millis() - lastSolarFetchMs < 3600000UL) return;
-  solarFetchRunning = true;
-  if (xTaskCreate(solarFetchTask, "solar", 8192, nullptr, 1, nullptr) != pdPASS) {
-    solarFetchRunning = false;
-    lastSolarFetchMs = millis();
-  }
-}
-
-void startUtcConfigPortal() {
-  if (utcWifiPortal) return;
-  utcWifiPortal = true;
-  utcPortalStartedMs = millis();
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.setSleep(false);
-  delay(100);
-  const IPAddress portalIp(192, 168, 77, 1);
-  const IPAddress portalGateway(192, 168, 77, 1);
-  const IPAddress portalMask(255, 255, 255, 0);
-  WiFi.softAPConfig(portalIp, portalGateway, portalMask);
-  const bool apStarted =
-      WiFi.softAP(SETUP_AP_SSID, SETUP_AP_PASSWORD, 1, false, 4);
-  utcConfigDns.start(53, "*", WiFi.softAPIP());
-
-  utcConfigServer.on("/", HTTP_GET, []() {
-    const char *page =
-        "<!doctype html><meta name='viewport' content='width=device-width'>"
-        "<meta charset='utf-8'><title>QMX UTC Wi-Fi</title>"
-        "<style>body{font-family:sans-serif;max-width:420px;margin:35px auto;"
-        "padding:15px}input,button{font-size:18px;width:100%;padding:10px;"
-        "margin:7px 0;box-sizing:border-box}</style>"
-        "<h2>QMX UTC Wi-Fi</h2><p>仅用于获取 UTC 时间（只支持 2.4 GHz）。</p>"
-        "<form method='post' action='/save'><label>Wi-Fi 名称</label>"
-        "<input name='s' required><label>Wi-Fi 密码</label>"
-        "<input name='p' type='password'><button>保存并重启</button></form>";
-    utcConfigServer.send(200, "text/html; charset=utf-8", page);
-  });
-  utcConfigServer.on("/save", HTTP_POST, []() {
-    const String ssid = utcConfigServer.arg("s");
-    const String password = utcConfigServer.arg("p");
-    utcPreferences.begin("wifi", false);
-    utcPreferences.putString("ssid", ssid);
-    utcPreferences.putString("pass", password);
-    utcPreferences.end();
-    utcConfigServer.send(200, "text/html; charset=utf-8",
-                         "<meta charset='utf-8'><h2>已保存，正在重启。</h2>");
-    delay(800);
-    ESP.restart();
-  });
-  utcConfigServer.onNotFound([]() {
-    utcConfigServer.sendHeader("Location", "/", true);
-    utcConfigServer.send(302, "text/plain", "");
-  });
-  utcConfigServer.begin();
-  Serial.print("UTC setup AP QMX_UTC: ");
-  Serial.println(apStarted ? "STARTED" : "FAILED");
-  Serial.print("UTC setup IP: ");
-  Serial.println(WiFi.softAPIP());
-  snprintf(utcText, sizeof(utcText), "UTC WIFI SET");
-  drawDisplay();
-}
-
-void startUtcWifi() {
-  // Always provide a five-minute setup window, even if old credentials exist.
-  startUtcConfigPortal();
-  utcPreferences.begin("wifi", true);
-  const String ssid = utcPreferences.getString("ssid", "");
-  const String password = utcPreferences.getString("pass", "");
-  utcPreferences.end();
-
-  if (!ssid.length()) {
-    return;
-  }
-  WiFi.begin(ssid.c_str(), password.c_str());
-  utcWifiConnecting = true;
-  utcWifiStartedMs = millis();
-  snprintf(utcText, sizeof(utcText), "UTC WIFI...");
-  Serial.print("Connecting UTC Wi-Fi: ");
-  Serial.println(ssid);
-}
-
-void maintainUtcTime() {
-  if (utcWifiPortal) {
-    utcConfigDns.processNextRequest();
-    utcConfigServer.handleClient();
-    if (WiFi.status() == WL_CONNECTED &&
-        millis() - utcPortalStartedMs >= 300000UL) {
-      utcConfigServer.stop();
-      utcConfigDns.stop();
-      WiFi.softAPdisconnect(true);
-      WiFi.mode(WIFI_STA);
-      utcWifiPortal = false;
-      Serial.println("UTC setup AP closed after five minutes");
-    }
-  }
-
-  if (utcWifiConnecting && WiFi.status() != WL_CONNECTED &&
-      millis() - utcWifiStartedMs > 15000) {
-    utcWifiConnecting = false;
-    Serial.println("UTC Wi-Fi failed; starting setup AP");
-    startUtcConfigPortal();
-  }
-
-  if (WiFi.status() != WL_CONNECTED) return;
-  utcWifiConnecting = false;
-  if (!ntpConfigured) {
-    // Zero timezone and daylight offsets: the display and QMX are always UTC.
-    configTime(0, 0, "ntp.aliyun.com", "ntp.tencent.com", "cn.pool.ntp.org");
-    ntpConfigured = true;
-    snprintf(utcText, sizeof(utcText), "UTC NTP...");
-    drawDisplay();
-    Serial.print("UTC Wi-Fi connected, IP: ");
-    Serial.println(WiFi.localIP());
-  }
-
-  if (millis() - lastNtpDisplayMs < 1000) return;
-  lastNtpDisplayMs = millis();
-  struct tm utc;
-  if (!getLocalTime(&utc, 10) || utc.tm_year < 124) return;
-
-  ntpTimeValid = true;
-  snprintf(utcText, sizeof(utcText), "UTC %02d:%02d:%02d",
-           utc.tm_hour, utc.tm_min, utc.tm_sec);
-  utcValid = true;
-
-  drawDisplay();
-}
 
 void formatFrequencyValue(uint64_t value, char *out, size_t size) {
   if (!value) {
@@ -350,9 +135,7 @@ void drawDisplay() {
   // Top status bar.
   oled.setFont(u8g2_font_6x10_tf);
   oled.drawStr(3, 9, DISPLAY_TITLE);
-  if (utcWifiPortal && WiFi.status() != WL_CONNECTED) {
-    snprintf(statusText, sizeof(statusText), "WIFI SETUP");
-  } else if (!auxAlive) {
+  if (!auxAlive) {
     snprintf(statusText, sizeof(statusText), "AUX SCANNING");
   } else if (swrProtection) {
     snprintf(statusText, sizeof(statusText), "SWR LOCK");
@@ -478,27 +261,7 @@ void drawDisplay() {
     }
     oled.drawStr(180, 61, swrText);
   } else {
-    const uint8_t rxPage = (millis() / 3500UL) % 3;
-    if (rxPage == 2) {
-      // Current-band solar/geomagnetic hint. This is an index-based guide,
-      // not a point-to-point propagation prediction.
-      char propagation[20];
-      char indices[20];
-      snprintf(propagation, sizeof(propagation), "%s %s", bandText(),
-               bandPropagationText());
-      if (solarDataValid) {
-        snprintf(indices, sizeof(indices), "SFI %d K%d", currentSolarFlux,
-                 currentKIndex);
-      } else {
-        snprintf(indices, sizeof(indices), "SFI -- K-");
-      }
-      oled.drawVLine(112, 49, 14);
-      oled.drawStr(57, 61, propagation);
-      oled.drawStr(118, 61, indices);
-      oled.sendBuffer();
-      return;
-    }
-
+    const uint8_t rxPage = (millis() / 3500UL) % 2;
     oled.drawVLine(106, 49, 14);
     const bool showGain = rxPage == 1;
     if (showGain) {
@@ -604,7 +367,7 @@ void handleReply(const String &s) {
         cwDecoded.remove(0, cwDecoded.length() - 120);
       }
     }
-  } else if (s.startsWith("TM") && s.length() >= 8 && !ntpTimeValid) {
+  } else if (s.startsWith("TM") && s.length() >= 8) {
     snprintf(utcText, sizeof(utcText), "UTC %c%c:%c%c:%c%c",
              s.charAt(2), s.charAt(3), s.charAt(4), s.charAt(5),
              s.charAt(6), s.charAt(7));
@@ -633,7 +396,10 @@ void handleReply(const String &s) {
 
   Serial.print("QMX: ");
   Serial.println(s);
-  drawDisplay();
+  if (millis() - lastDisplayMs >= 200) {
+    lastDisplayMs = millis();
+    drawDisplay();
+  }
 }
 
 void readQmx() {
@@ -701,14 +467,11 @@ void setup() {
   oled.setContrast(180);
   startQmxUart();
   drawDisplay();
-  startUtcWifi();
-  Serial.println("QMX AUX display started (read-only CAT polling)");
+  Serial.println("QMX AUX display started (offline, read-only CAT polling)");
 }
 
 void loop() {
   readQmx();
-  maintainUtcTime();
-  maintainSolarData();
 
   const bool cwReceive = !transmitting && (catMode == '3' || catMode == '7');
   const uint32_t queryInterval = transmitting ? 80 : (cwReceive ? 100 : 250);

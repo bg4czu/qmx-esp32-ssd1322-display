@@ -2,7 +2,7 @@
 
 An external 3.12-inch 256x64 SSD1322 OLED display for the QRP Labs QMX/QMX+.
 The ESP32-S3 reads the QMX AUX CAT interface, shows radio status in real time,
-and uses Wi-Fi for UTC synchronization and hourly propagation indicators.
+and reads the QMX AUX CAT interface without Wi-Fi or background network tasks.
 
 This build was developed and tested with a QMX+ and a 7-pin SPI SSD1322
 module.
@@ -17,14 +17,10 @@ The default OLED top-line identifier is the operator callsign `BG4CZU`.
 - RX S-meter, AF volume, RF gain and AGC attenuation
 - TX power/SSB PEP, SWR and SWR protection warning
 - Large two-line QMX CW decoder view with fast text polling
-- UTC time from NTP, displayed locally without writing the QMX RTC
-- Current-band `GOOD` / `FAIR` / `POOR` hint using hourly HAMQSL SFI and K-index
-- Captive Wi-Fi setup page; home Wi-Fi credentials are stored only in ESP32 NVS
+- UTC time read from the QMX internal RTC (`TM;`)
+- Offline operation with no Wi-Fi, NTP, HTTP, or propagation background tasks
 - Fixed, verified AUX UART RX/TX orientation for FT8 stability
 - Separate passive cable-continuity and AUX-voltage diagnostic sketches
-
-The propagation label is a simple index-based operating hint, not a
-point-to-point prediction.
 
 ## Hardware
 
@@ -116,41 +112,11 @@ Near the top of the main sketch, change these constants if required:
 
 ```cpp
 constexpr char DISPLAY_TITLE[] = "BG4CZU";
-constexpr char SETUP_AP_SSID[] = "QMX_UTC";
-constexpr char SETUP_AP_PASSWORD[] = "qmxutc88";
 ```
 
-Change the setup password before giving programmed hardware to another person.
-
-## Wi-Fi setup and UTC
-
-For five minutes after startup, the ESP32 provides the setup network:
-
-- SSID: `QMX_UTC`
-- Default password: `qmxutc88`
-- Setup address: `http://192.168.77.1`
-
-Enter a 2.4 GHz-capable Wi-Fi SSID and password. A combined 2.4/5 GHz SSID is
-normally compatible. After connection, the display changes from `UTC WIFI...`
-to `UTC NTP...`, then to `UTC HH:MM:SS`.
-
-The setup form stores credentials in ESP32 NVS. No home-network SSID or password
-is embedded in this repository.
-
-The AUX connection is deliberately read-only. NTP updates the OLED clock only;
-the firmware never sends a `TMhhmmss;` clock-set command to the QMX. This avoids
-competing with FT8 applications that control the radio over USB CAT.
-
-## Propagation data
-
-The firmware reads the public HAMQSL solar XML feed no more than once per hour,
-as requested by the feed provider. It displays the current SFI and K-index and
-derives a compact current-band hint. Data retrieval runs in a background task
-so CAT polling and CW decoding remain responsive.
-
-The current implementation uses TLS without certificate validation for this
-public, non-sensitive feed. Do not reuse that pattern for credentials or other
-sensitive data.
+The firmware is intentionally offline: it does not create an access point, join
+Wi-Fi, run NTP, or fetch propagation data. UTC is displayed only when the QMX
+returns its own clock via `TM;`; the AUX connection remains read-only.
 
 ## Safety
 
@@ -167,4 +133,3 @@ sensitive data.
 
 - QRP Labs QMX/QMX+ CAT protocol and transceiver documentation
 - U8g2 display library
-- HAMQSL/N0NBH solar-terrestrial XML data
