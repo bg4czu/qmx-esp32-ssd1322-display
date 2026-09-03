@@ -32,8 +32,6 @@ DNSServer utcConfigDns;
 Preferences utcPreferences;
 
 String reply;
-String usbCommand;
-String pendingUtc;
 uint64_t frequencyHz = 0;
 uint64_t vfoAHz = 0;
 uint64_t vfoBHz = 0;
@@ -73,7 +71,6 @@ bool ntpConfigured = false;
 uint32_t utcWifiStartedMs = 0;
 uint32_t utcPortalStartedMs = 0;
 uint32_t lastNtpDisplayMs = 0;
-uint32_t lastQmxNtpSetMs = 0;
 
 int currentSolarFlux = 0;
 int currentKIndex = -1;
@@ -270,17 +267,6 @@ void maintainUtcTime() {
            utc.tm_hour, utc.tm_min, utc.tm_sec);
   utcValid = true;
 
-  // Correct the QMX RTC after NTP lock, then refresh it every six hours.
-  if (auxAlive && !transmitting &&
-      (lastQmxNtpSetMs == 0 || millis() - lastQmxNtpSetMs >= 21600000UL)) {
-    char command[12];
-    snprintf(command, sizeof(command), "TM%02d%02d%02d;",
-             utc.tm_hour, utc.tm_min, utc.tm_sec);
-    qmx.print(command);
-    lastQmxNtpSetMs = millis();
-    Serial.print("QMX UTC synchronized by NTP: ");
-    Serial.println(command);
-  }
   drawDisplay();
 }
 
@@ -544,6 +530,22 @@ void drawDisplay() {
   oled.sendBuffer();
 }
 
+bool parseCatFrequency(const String &s, size_t start, size_t digits,
+                       uint64_t &value) {
+  if (digits == 0 || digits > 11 || start + digits > s.length()) return false;
+  uint64_t parsed = 0;
+  for (size_t i = start; i < start + digits; ++i) {
+    const char c = s.charAt(i);
+    if (c < '0' || c > '9') return false;
+    parsed = parsed * 10ULL + static_cast<uint64_t>(c - '0');
+  }
+  // Reject corrupt/partial CAT replies instead of ever replacing a valid VFO
+  // with 0 Hz. QMX+ coverage ends at 6 m, so 60 MHz leaves safe headroom.
+  if (parsed < 100000ULL || parsed > 60000000ULL) return false;
+  value = parsed;
+  return true;
+}
+
 void handleReply(const String &s) {
   if (s.length() < 2) return;
   auxAlive = true;
@@ -551,7 +553,14 @@ void handleReply(const String &s) {
 
   if (s.startsWith("IF") && s.length() >= 30) {
     const bool wasTransmitting = transmitting;
-    frequencyHz = strtoull(s.substring(2, 13).c_str(), nullptr, 10);
+    uint64_t parsedFrequency = 0;
+    const bool frequencyValid = parseCatFrequency(s, 2, 11, parsedFrequency);
+    if (frequencyValid) {
+      frequencyHz = parsedFrequency;
+    } else {
+      Serial.print("Ignored invalid IF frequency: ");
+      Serial.println(s);
+    }
     ritHz = s.substring(18, 23).toInt();
     ritEnabled = s.length() > 23 && s.charAt(23) == '1';
     transmitting = s.charAt(28) == '1';
@@ -562,7 +571,7 @@ void handleReply(const String &s) {
     catMode = s.charAt(29);
     if (s.length() > 30) activeVfo = s.charAt(30) == '1' ? 'B' : 'A';
     splitEnabled = s.length() > 32 && s.charAt(32) == '1';
-    if (splitEnabled) {
+    if (splitEnabled && frequencyValid) {
       if (transmitting) vfoBHz = frequencyHz;
       else vfoAHz = frequencyHz;
     }
@@ -614,9 +623,15 @@ void handleReply(const String &s) {
   } else if (s.startsWith("KS") && s.length() > 2) {
     keyerWpm = s.substring(2).toInt();
   } else if (s.startsWith("FA") && s.length() > 2) {
-    vfoAHz = strtoull(s.substring(2).c_str(), nullptr, 10);
+    uint64_t parsedFrequency = 0;
+    if (parseCatFrequency(s, 2, s.length() - 2, parsedFrequency)) {
+      vfoAHz = parsedFrequency;
+    }
   } else if (s.startsWith("FB") && s.length() > 2) {
-    vfoBHz = strtoull(s.substring(2).c_str(), nullptr, 10);
+    uint64_t parsedFrequency = 0;
+    if (parseCatFrequency(s, 2, s.length() - 2, parsedFrequency)) {
+      vfoBHz = parsedFrequency;
+    }
   }
 
   Serial.print("QMX: ");
@@ -632,23 +647,6 @@ void readQmx() {
       reply = "";
     } else if (c >= 32 && c <= 126) {
       if (reply.length() < 80) reply += c;
-    }
-  }
-}
-
-void readUsbCommand() {
-  while (Serial.available()) {
-    const char c = static_cast<char>(Serial.read());
-    if (c == '\r' || c == '\n') {
-      usbCommand.trim();
-      if (usbCommand.startsWith("SETUTC ") && usbCommand.length() == 13) {
-        pendingUtc = usbCommand.substring(7);
-        Serial.print("UTC set requested: ");
-        Serial.println(pendingUtc);
-      }
-      usbCommand = "";
-    } else if (c >= 32 && c <= 126 && usbCommand.length() < 32) {
-      usbCommand += c;
     }
   }
 }
@@ -718,14 +716,8 @@ void setup() {
 
 void loop() {
   readQmx();
-  readUsbCommand();
   maintainUtcTime();
   maintainSolarData();
-
-  if (auxAlive && pendingUtc.length() == 6) {
-    qmx.print("TM" + pendingUtc + ";");
-    pendingUtc = "";
-  }
 
   const bool cwReceive = !transmitting && (catMode == '3' || catMode == '7');
   const uint32_t queryInterval = transmitting ? 80 : (cwReceive ? 100 : 250);

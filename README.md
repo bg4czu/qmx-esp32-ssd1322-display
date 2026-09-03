@@ -15,7 +15,7 @@ module.
 - RX S-meter, AF volume, RF gain and AGC attenuation
 - TX power/SSB PEP, SWR and SWR protection warning
 - Large two-line QMX CW decoder view with fast text polling
-- UTC time from NTP, with QMX RTC synchronization every six hours
+- UTC time from NTP, displayed locally without writing the QMX RTC
 - Current-band `GOOD` / `FAIR` / `POOR` hint using hourly HAMQSL SFI and K-index
 - Captive Wi-Fi setup page; home Wi-Fi credentials are stored only in ESP32 NVS
 - Automatic AUX UART RX/TX pin-orientation scan
@@ -133,6 +133,10 @@ to `UTC NTP...`, then to `UTC HH:MM:SS`.
 
 The setup form stores credentials in ESP32 NVS. No home-network SSID or password
 is embedded in this repository.
+
+The AUX connection is deliberately read-only. NTP updates the OLED clock only;
+the firmware never sends a `TMhhmmss;` clock-set command to the QMX. This avoids
+competing with FT8 applications that control the radio over USB CAT.
 
 ## Propagation data
 
