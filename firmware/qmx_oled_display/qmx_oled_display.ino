@@ -14,12 +14,11 @@ constexpr uint8_t OLED_MOSI = 11;
 constexpr uint8_t OLED_RST = 13;
 constexpr uint8_t OLED_DC = 9;
 constexpr uint8_t OLED_CS = 10;
-constexpr char DISPLAY_TITLE[] = "QMX+";
+constexpr char DISPLAY_TITLE[] = "BG4CZU";
 constexpr char SETUP_AP_SSID[] = "QMX_UTC";
 constexpr char SETUP_AP_PASSWORD[] = "qmxutc88";  // Change before sharing hardware.
-// Initial UART scan orientation. The firmware automatically swaps these pins
-// until it receives valid QMX CAT replies; the verified wiring is documented
-// in the project README.
+// Verified wiring: QMX Tip/ red wire is QMX TX -> ESP RX GPIO18; Ring/white
+// wire is QMX RX <- ESP TX GPIO17. Keep this direction fixed during FT8.
 constexpr uint8_t QMX_RX = 17;
 constexpr uint8_t QMX_TX = 18;
 constexpr uint32_t QMX_BAUD = 9600;
@@ -58,10 +57,8 @@ String cwDecoded;
 char utcText[13] = "UTC --:--:--";
 bool utcValid = false;
 bool auxAlive = false;
-bool pinsReversed = false;
 uint32_t lastReplyMs = 0;
 uint32_t lastQueryMs = 0;
-uint32_t lastPinSwapMs = 0;
 uint8_t queryStep = 0;
 
 bool utcWifiConnecting = false;
@@ -691,16 +688,10 @@ void sendNextQuery() {
 void startQmxUart() {
   qmx.end();
   delay(10);
-  if (pinsReversed) {
-    qmx.begin(QMX_BAUD, SERIAL_8N1, QMX_TX, QMX_RX);
-    Serial.println("Trying RX=GPIO18(red), TX=GPIO17(white)");
-  } else {
-    qmx.begin(QMX_BAUD, SERIAL_8N1, QMX_RX, QMX_TX);
-    Serial.println("Trying RX=GPIO17(white), TX=GPIO18(red)");
-  }
+  qmx.begin(QMX_BAUD, SERIAL_8N1, QMX_TX, QMX_RX);
+  Serial.println("Fixed AUX RX=GPIO18(red), TX=GPIO17(white)");
   reply = "";
   queryStep = 0;
-  lastPinSwapMs = millis();
 }
 
 void setup() {
@@ -729,11 +720,6 @@ void loop() {
   if (auxAlive && millis() - lastReplyMs > 2500) {
     auxAlive = false;
     drawDisplay();
-  }
-
-  if (!auxAlive && millis() - lastPinSwapMs >= 3000) {
-    pinsReversed = !pinsReversed;
-    startQmxUart();
   }
 
 }

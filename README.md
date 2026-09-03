@@ -7,6 +7,8 @@ and uses Wi-Fi for UTC synchronization and hourly propagation indicators.
 This build was developed and tested with a QMX+ and a 7-pin SPI SSD1322
 module.
 
+The default OLED top-line identifier is the operator callsign `BG4CZU`.
+
 ![QMX+ with the ESP32-S3 SSD1322 external display](docs/images/qmx-oled-build.jpg)
 
 ## Features
@@ -18,7 +20,7 @@ module.
 - UTC time from NTP, displayed locally without writing the QMX RTC
 - Current-band `GOOD` / `FAIR` / `POOR` hint using hourly HAMQSL SFI and K-index
 - Captive Wi-Fi setup page; home Wi-Fi credentials are stored only in ESP32 NVS
-- Automatic AUX UART RX/TX pin-orientation scan
+- Fixed, verified AUX UART RX/TX orientation for FT8 stability
 - Separate passive cable-continuity and AUX-voltage diagnostic sketches
 
 The propagation label is a simple index-based operating hint, not a
@@ -68,8 +70,9 @@ Configure the QMX AUX serial interface for:
 - Baud rate: 9600
 - 8 data bits, no parity, 1 stop bit
 
-The main firmware initially tries both GPIO17/GPIO18 UART orientations and
-keeps the orientation that returns valid CAT replies.
+The main firmware uses the verified orientation permanently: QMX TX/Tip to
+ESP32 RX GPIO18, and QMX RX/Ring from ESP32 TX GPIO17. It does not auto-swap
+pins when replies are temporarily delayed during FT8.
 
 ## Firmware layout
 
@@ -112,7 +115,7 @@ Bluetooth virtual COM port.
 Near the top of the main sketch, change these constants if required:
 
 ```cpp
-constexpr char DISPLAY_TITLE[] = "QMX+";
+constexpr char DISPLAY_TITLE[] = "BG4CZU";
 constexpr char SETUP_AP_SSID[] = "QMX_UTC";
 constexpr char SETUP_AP_PASSWORD[] = "qmxutc88";
 ```
