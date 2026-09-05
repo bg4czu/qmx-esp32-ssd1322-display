@@ -415,14 +415,11 @@ void readQmx() {
 }
 
 void sendNextQuery() {
-  static uint8_t txQueryStep = 0;
   static uint8_t cwQueryStep = 0;
   static bool sendIfNext = true;
   if (transmitting) {
-    // Power is queried repeatedly so short SSB voice peaks are not missed.
-    static const char *txQueries[] = {"PC;", "PC;", "IF;", "PC;", "SW;", "SR;"};
-    qmx.print(txQueries[txQueryStep]);
-    txQueryStep = (txQueryStep + 1) % 6;
+    // Do not send CAT commands while the QMX PA is transmitting.  This keeps
+    // the AUX line quiet during RF and avoids corrupting the radio state.
     return;
   }
   if (catMode == '3' || catMode == '7') {
